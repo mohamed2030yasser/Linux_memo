@@ -1,0 +1,170 @@
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/i2c.h>
+#include <linux/delay.h>
+
+#define MPU6050_ADDR 0x68
+
+#define MPU6050_SMPLRT_DIV 0x19
+#define MPU6050_CONFIG 0x1A
+#define MPU6050_GYRO_CONFIG 0x1B
+#define MPU6050_ACCEL_CONFIG 0x1C
+#define MPU6050_ACCEL_XOUT_H 0x3B
+#define MPU6050_ACCEL_YOUT_H 0x3D
+#define MPU6050_ACCEL_ZOUT_H 0x3F
+#define MPU6050_TEMP_OUT_H 0x41
+#define MPU6050_GYRO_XOUT_H 0x43
+#define MPU6050_GYRO_YOUT_H 0x45
+#define MPU6050_GYRO_ZOUT_H 0x47
+#define MPU6050_PWR_MGMT_1 0x6B
+#define MPU6050_WHO_AM_I 0x75
+#define MPU6050_DEVICE_ID 0x68
+
+
+
+
+
+/* Meta Information */
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("memo yasser");
+MODULE_DESCRIPTION("A hello world Psuedo device driver");
+//==========================================
+/*
+if ((mpu6050_read_register(MPU6050_WHO_AM_I, &dev_id, 1) < 0) ||( dev_id != MPU6050_DEVICE_ID)) {
+    dev_err(&client->dev, "MPU6050 not found\n");
+    return -ENODEV;
+}
+*/
+
+static struct i2c_client *mpu6050_client;
+
+static int mpu6050_read_register(uint8_t reg, uint8_t *data, size_t len) {
+    struct i2c_msg msgs[2];
+    uint8_t buf[1] = {reg};
+
+    msgs[0].addr = mpu6050_client->addr;
+    msgs[0].flags = 0;
+    msgs[0].buf = buf;
+    msgs[0].len = 1;
+
+    msgs[1].addr = mpu6050_client->addr;
+    msgs[1].flags = I2C_M_RD;
+    msgs[1].buf = data;
+    msgs[1].len = len;
+
+    return i2c_transfer(mpu6050_client->adapter, msgs, 2);
+}
+
+static int mpu6050_write_register(uint8_t reg, uint8_t val) {
+    uint8_t buf[2] = {reg, val};
+    return i2c_master_send(mpu6050_client, buf, 2);
+}
+
+static int mpu6050_init(void) {
+    int ret;
+    uint8_t buffer;
+    ret = mpu6050_read_register(MPU6050_WHO_AM_I, &buffer, 1);
+    if (ret < 0 || buffer != MPU6050_DEVICE_ID) {
+        dev_err(&mpu6050_client->dev, "MPU6050 device not found\n");
+        return -ENODEV;
+    }
+
+    /* Wake up MPU6050 */
+    ret = mpu6050_write_register(MPU6050_PWR_MGMT_1, 0x00);
+    if (ret < 0) {
+        dev_err(&mpu6050_client->dev, "Error waking up MPU6050\n");
+        return ret;
+    }
+
+    /* Set accelerometer range */
+    ret = mpu6050_write_register(MPU6050_ACCEL_CONFIG, 0x00);
+    if (ret < 0) {
+        dev_err(&mpu6050_client->dev, "Error setting accelerometer range\n");
+        return ret;
+    }
+
+    /* Set gyroscope range */
+    ret = mpu6050_write_register(MPU6050_GYRO_CONFIG, 0x00);
+    if (ret < 0) {
+        dev_err(&mpu6050_client->dev, "Error setting gyroscope range\n");
+        return ret;
+    }
+
+    return 0;
+}
+
+static int mpu6050_get_rotation(int *x, int *y, int *z) {
+    int ret;
+    uint8_t buffer[6];
+    /* Read accelerometer and gyroscope values */
+    ret = mpu6050_read_register(MPU6050_ACCEL_XOUT_H, buffer, 6);
+    if (ret < 0) {
+        dev_err(&mpu6050_client->dev, "Error reading accelerometer and gyroscope values\n");
+        return ret;
+    }
+
+    /* Calculate rotation values */
+    *x = (int16_t)((buffer[0] << 8) | buffer[1]);
+    *y = (int16_t)((buffer[2] << 8) | buffer[3]);
+    *z = (int16_t)((buffer[4] << 8) | buffer[5]);
+
+    return 0;
+}
+
+static ssize_t mpu6050_show_rotation(struct device *dev, struct device_attribute *attr, char *buf) {
+    int x, y, z;
+    int ret;
+    ret = mpu6050_get_rotation(&x, &y, &z);
+    if (ret < 0) {
+        dev_err(dev, "Error getting MPU6050 rotation\n");
+        return ret;
+    }
+    return sprintf(buf, "X: %d deg/s\nY: %d deg/s\nZ: %d deg/s\n", x, y, z);
+}
+
+
+
+
+
+static const struct of_device_id mpu6050_dt_ids[] = {
+    { .compatible = "invensense,mpu6050" },
+    {},
+};
+MODULE_DEVICE_TABLE(of, mpu6050_dt_ids);
+
+static int mpu6050_probe(struct i2c_client *client, const struct i2c_device_id *id) {
+    int ret;
+    struct device *dev = &client->dev;
+    dev_info(dev, "mpu6050_probe\n");
+
+    mpu6050_client = client;
+
+    ret = mpu6050_init();
+    if (ret < 0) {
+        dev_err(dev, "failed to initialize mpu6050\n");
+        return ret;
+    }
+
+    return 0;
+}
+
+static int mpu6050_remove(struct i2c_client *client) {
+    struct device *dev = &client->dev;
+    dev_info(dev, "mpu6050_remove\n");
+
+    return 0;
+}
+
+static struct i2c_driver mpu6050_driver = {
+    .driver = {
+    .name = "mpu6050",
+    .owner = THIS_MODULE,
+    .of_match_table = of_match_ptr(mpu6050_dt_ids),
+    },
+    .probe = mpu6050_probe,
+    .remove = mpu6050_remove,
+};
+
+module_i2c_driver(mpu6050_driver);
+
+

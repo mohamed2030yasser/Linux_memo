@@ -1,0 +1,181 @@
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <linux/delay.h>
+#include <linux/cdev.h>
+
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("memo&gamil");
+MODULE_DESCRIPTION("MPU6050 Device Driver");
+
+#define MPU6050_ADDRESS 0x68
+#define PWR_MGMT_1 0x6B
+#define ACCEL_XOUT_H 0x3B
+#define GYRO_XOUT_H 0x43
+
+static struct i2c_client *mpu6050_client;
+
+static dev_t mpu6050_devno;
+static struct class *mpu6050_class;
+static struct device *mpu6050_device;
+static struct cdev mpu6050_cdev;
+
+
+
+
+
+static int mpu6050_open(struct inode *inode, struct file *file)
+{
+    return 0;
+}
+
+static int mpu6050_release(struct inode *inode, struct file *file)
+{
+    return 0;
+}
+
+static ssize_t mpu6050_read(struct file *file, char __user *buf, size_t count, loff_t *offset)
+{
+    uint8_t buffer[2];
+    int16_t accel_xout, gyro_xout;
+    float accel_xout_scaled, gyro_xout_scaled;
+
+    // Wake up MPU6050
+    buffer[0] = PWR_MGMT_1;
+    buffer[1] = 0;
+    if (i2c_master_send(mpu6050_client, buffer, 2) != 2) {
+        return -EIO;
+    }
+
+    // Read accelerometer and gyroscope values
+    accel_xout = i2c_smbus_read_word_data(mpu6050_client, ACCEL_XOUT_H);
+    gyro_xout = i2c_smbus_read_word_data(mpu6050_client, GYRO_XOUT_H);
+
+    // Scale accelerometer and gyroscope values
+    accel_xout_scaled = accel_xout / 16384.0;
+    gyro_xout_scaled = gyro_xout / 131.0;
+
+    // Copy values to user space
+    if (copy_to_user(buf, &accel_xout_scaled, sizeof(float)) != 0) {
+        return -EFAULT;
+    }
+    if (copy_to_user(buf + sizeof(float), &gyro_xout_scaled, sizeof(float)) != 0) {
+        return -EFAULT;
+    }
+
+    return count;
+}
+
+static ssize_t mpu6050_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
+{
+    return -ENOSYS;
+}
+
+static struct file_operations mpu6050_fops = {
+    .owner = THIS_MODULE,
+    .open = mpu6050_open,
+    .release = mpu6050_release,
+    .read = mpu6050_read,
+    .write = mpu6050_write,
+};
+
+static int mpu6050_probe(struct i2c_client *client, const struct i2c_device_id *id)
+{
+    int ret;
+
+    // Check if the device is the MPU6050 sensor
+    if (client->addr != MPU6050_ADDRESS) {
+        dev_err(&client->dev, "Invalid device address\n");
+        return -EINVAL;
+    }
+
+    // Register the device file
+    ret = alloc_chrdev_region(&mpu6050_devno, 0, 1, "mpu6050");
+    if (ret < 0) {
+        dev_err(&client->dev, "Failed to register device file\n");
+        return ret;
+    }
+
+    // Create the device class
+    mpu6050_class = class_create(THIS_MODULE, "mpu6050");
+    if (IS_ERR(mpu6050_class)) {
+        unregister_chrdev_region(mpu6050_devno, 1);
+        dev_err(&client->dev, "Failed to create device class\n");
+        return PTR_ERR(mpu6050_class);
+    }
+    // Create the device
+    mpu6050_device = device_create(mpu6050_class, NULL, mpu6050_devno, NULL, "mpu6050");
+    if (IS_ERR(mpu6050_device)) {
+    class_destroy(mpu6050_class);
+    unregister_chrdev_region(mpu6050_devno, 1);
+    dev_err(&client->dev, "Failed to create device\n");
+    return PTR_ERR(mpu6050_device);
+    }
+
+    // Save a reference to the client
+    mpu6050_client = client;
+
+    // Initialize the device
+    ret = i2c_smbus_write_byte_data(client, PWR_MGMT_1, 0);
+    if (ret < 0) {
+        dev_err(&client->dev, "Failed to initialize device\n");
+        return ret;
+    }
+
+    // Register the device file
+    cdev_init(&mpu6050_cdev, &mpu6050_fops);
+    mpu6050_cdev.owner = THIS_MODULE;
+    ret = cdev_add(&mpu6050_cdev, mpu6050_devno, 1);
+    if (ret < 0) {
+        device_destroy(mpu6050_class, mpu6050_devno);
+        class_destroy(mpu6050_class);
+        unregister_chrdev_region(mpu6050_devno, 1);
+        dev_err(&client->dev, "Failed to register device file\n");
+        return ret;
+    }
+
+    dev_info(&client->dev, "MPU6050 driver initialized\n");
+
+    return 0;
+}
+
+static int mpu6050_remove(struct i2c_client *client)
+{
+    cdev_del(&mpu6050_cdev);
+    device_destroy(mpu6050_class, mpu6050_devno);
+    class_destroy(mpu6050_class);
+    unregister_chrdev_region(mpu6050_devno, 1);
+    return 0;
+}
+
+static const struct i2c_device_id mpu6050_id[] = {
+    { "mpu6050", 0 },
+    { },
+};
+
+MODULE_DEVICE_TABLE(i2c, mpu6050_id);
+
+static struct i2c_driver mpu6050_driver = {
+    .driver = {
+    .name = "mpu6050",
+    .owner = THIS_MODULE,
+    },
+    .probe = mpu6050_probe,
+    .remove = mpu6050_remove,
+    .id_table = mpu6050_id,
+};
+
+static int __init mpu6050_init(void)
+{
+    return i2c_add_driver(&mpu6050_driver);
+}
+
+static void __exit mpu6050_exit(void)
+{
+    i2c_del_driver(&mpu6050_driver);
+}
+
+module_init(mpu6050_init);
+module_exit(mpu6050_exit);
